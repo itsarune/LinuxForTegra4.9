@@ -21,6 +21,30 @@
 // how: --struct ioc messages contains (chip select id? motor name?)-- won't work i don't think
 // how: one file descriptor connects to all four motors, then we can send a ioc message with the commanded motor velcoities for four motors
 
+struct spi_device tbots_devices[5] = 
+{
+
+};
+
+static struct spi_driver spidev_spi_driver = {
+	.driver = {
+		.name =		"tbots_spi",
+        .owner = THIS_MODULE,
+        .pm = &tbots_spi_pm_ops, // TODO: what's this for, needed?
+        // TODO: unclear if the following two lines are needed
+		//.of_match_table = of_match_ptr(spidev_dt_ids),
+		//.acpi_match_table = ACPI_PTR(spidev_acpi_ids),
+	},
+	.probe =	tbots_spi_probe, // TODO: implement
+	.remove =	tbots_spi_remove, // TODO: implement
+
+	/* NOTE:  suspend/resume methods are not necessary here.
+	 * We don't do anything except pass the requests to/from
+	 * the underlying controller.  The refrigerator handles
+	 * most issues; the controller driver handles the rest.
+	 */
+
+
 static const struct file_operations tbots_spi_fops =
 {
 	.owner =	THIS_MODULE,
@@ -102,8 +126,8 @@ static int tbots_spi_release(struct inode *inode, struct file *flip)
 	dev->users--;
 
     // last close? shut down device
-    if (!dev->users) {
-
+    if (!dev->users)
+    {
 		kfree(dev->tx_buffer);
 		dev->tx_buffer = NULL;
 
@@ -117,4 +141,15 @@ static int tbots_spi_release(struct inode *inode, struct file *flip)
 	}
 
     return 0;
+}
+
+static ssize_t spidev_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
+{
+    ssize_t status = 0;
+
+    if (count > bufsiz)
+    {
+		return -EMSGSIZE;
+    }
+    // TODO: finish
 }
