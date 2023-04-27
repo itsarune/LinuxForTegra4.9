@@ -1,3 +1,6 @@
+## Note
+This is a form of the linux kernel 4.9 repo with an added spi kernel module for communicating with Thunderbots motors.
+
         Linux kernel release 4.x <http://kernel.org/>
 
 These are the release notes for Linux version 4.  Read them carefully,

@@ -1127,7 +1127,10 @@ Your cooperation is appreciated.
 
 		NAMING CONFLICT -- PROPOSED REVISED NAME /dev/rpda0 etc
 
- 60-63 char	LOCAL/EXPERIMENTAL USE
+
+ 60: TBOTS reserved for TBOTS SPI
+
+ 61-63 char	LOCAL/EXPERIMENTAL USE
 
  60-63 block	LOCAL/EXPERIMENTAL USE
 		Allocated for local/experimental use.  For devices not
