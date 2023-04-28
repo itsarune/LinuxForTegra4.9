@@ -90,7 +90,7 @@ static const struct file_operations tbots_spi_fops =
 	.owner =	THIS_MODULE,
 
     .write = // TODO: impelment
-    .read  = // TODO: implement 
+    .read  = tbots_spi_read,
     .unlocked_ioctl = // TODO:implement
     .open = tbots_spi_open,
     .release = tbots_spi_release,
@@ -102,7 +102,7 @@ struct tbots_spi_data {
 	spinlock_t		spi_lock;
     // 5 motors here spi_device info globals 
 	//struct spi_device	*spi;
-    char            *requested_gpios;
+    char            *requested_cs;
     char            num_transfers;
 	struct list_head	device_entry;
 
@@ -112,6 +112,7 @@ struct tbots_spi_data {
 	u8			*tx_buffer;
 	u8			*rx_buffer;
 	u32			speed_hz;
+    bool        sync;
 };
 
 static int tbots_spi_open(struct inode *inode, struct file *filp)
@@ -185,7 +186,7 @@ static int tbots_spi_release(struct inode *inode, struct file *flip)
 }
 
 static ssize_t
-tbots_spi_sync(struct tbots_spi_data *spidata, struct spi_message *message)
+tbots_spi_sync(struct tbots_spi_data *spidata, struct spi_message *message, int cs)
 {
 	DECLARE_COMPLETION_ONSTACK(done);
 	int status;
@@ -193,7 +194,7 @@ tbots_spi_sync(struct tbots_spi_data *spidata, struct spi_message *message)
 
 	spin_lock_irq(&spidata->spi_lock);
     // TODO: get spi_device, set up spi device in init
-	spi = spidata->spi;
+	spi = tbots_devices[i];
 	spin_unlock_irq(&spidata->spi_lock);
 
 	if (spi == NULL)
@@ -224,10 +225,70 @@ tbots_sync_read(struct tbots_spi_data *spi_data, size_t len)
 
         spi_message_init(&m);
         spi_message_add_tail(&t, &m);
-        total_read += tbots_spi_sync(spi_data, &m);
+        total_read += tbots_spi_sync(spi_data, &m, spi_data->requested_cs[i]);
     }
 }
 
+static inline ssize_t
+tbots_sync_write(struct tbots_spi_data *tbots_data, size_t len)
+{
+    ssize_t total_writ = 0;
+    for (int i = 0; i < tbots_data, ++i)
+    {
+        struct spi_transfer	t = {
+                .tx_buf		= spidev->tx_buffer,
+                .len		= len,
+                .speed_hz	= spidev->speed_hz,
+            };
+        struct spi_message	m;
+
+        spi_message_init(&m);
+        spi_message_add_tail(&t, &m);
+	    total_writ += tbots_spi_sync(spidev, &m, spi_data->requested_cs[i]);
+    }
+
+    return total_writ;
+}
+
+
+/* Write-only message with current device setup */
+static ssize_t
+tbots_spi_write(struct file *filp, const char __user *buf,
+		size_t count, loff_t *f_pos)
+{
+	struct tbots_spi_data	*tbots_data;
+	ssize_t			status = 0;
+	unsigned long		missing;
+
+    // return error if it's bigger than the buffer we allocated
+	if (count > bufsiz)
+    {
+		return -EMSGSIZE;
+    }
+
+	tbots_data = filp->private_data;
+
+	mutex_lock(&tbots_data->buf_lock);
+	missing = copy_from_user(tbots_data->tx_buffer, buf, count);
+	if (missing == 0)
+    {
+        if (tbots_data->sync)
+        {
+		    status = tbots_sync_write(tbots_data, count);
+        }
+        else
+        {
+		    status = tbots_async_write(tbots_data, count);
+        }
+    }
+	else
+    {
+		status = -EFAULT;
+    }
+	mutex_unlock(&spidev->buf_lock);
+
+	return status;
+}
 
 static ssize_t tbots_spi_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
 {
