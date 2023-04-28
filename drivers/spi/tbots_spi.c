@@ -1,8 +1,11 @@
 #include <linux/fs.h> // allows us to add a new driver
 
+#include <linux/spi/spi.h>
 #include <linux/spi/tbots_spi.h>
 
 #define TBOTS_SPI_MAJOR 60
+#define TBOTS_MOTOR_BUS_NUM 0
+#define TBOTS_MULTIPLE_TRANSFER_OFFSET 5
 
 // register_chrdev adds a new driver by registering a major number to it
 // MAJOR NUMBER identifies the driver associated with it (so all major numbers with this major number will associate with this driver)
@@ -21,11 +24,48 @@
 // how: --struct ioc messages contains (chip select id? motor name?)-- won't work i don't think
 // how: one file descriptor connects to all four motors, then we can send a ioc message with the commanded motor velcoities for four motors
 
-struct spi_device tbots_devices[5] = 
+struct spi_board_info tbots_device_info[5] = 
 {
-
+    {
+        .modalias       = "front_left",
+        .max_speed_hz   = 1000000,
+        .bus_num        = TBOTS_MOTOR_BUS_NUM,
+        .chip_select    = 0,
+        .mode           = SPI_MODE_3
+    },
+    {
+        .modalias       = "back_left",
+        .max_speed_hz   = 1000000,
+        .bus_num        = TBOTS_MOTOR_BUS_NUM,
+        .chip_select    = 1,
+        .mode           = SPI_MODE_3
+    },
+    {
+        .modalias       = "back_right",
+        .max_speed_hz   = 1000000,
+        .bus_num        = TBOTS_MOTOR_BUS_NUM,
+        .chip_select    = 2,
+        .mode           = SPI_MODE_3
+    },
+    {
+        .modalias       = "front_right",
+        .max_speed_hz   = 1000000,
+        .bus_num        = TBOTS_MOTOR_BUS_NUM,
+        .chip_select    = 3,
+        .mode           = SPI_MODE_3
+    },
+    {
+        .modalias       = "dribbler",
+        .max_speed_hz   = 1000000,
+        .bus_num        = TBOTS_MOTOR_BUS_NUM,
+        .chip_select    = 4,
+        .mode           = SPI_MODE_3
+    },
 };
 
+struct spi_device tbots_devices[5];
+
+// TODO: do this in init()
 static struct spi_driver spidev_spi_driver = {
 	.driver = {
 		.name =		"tbots_spi",
@@ -52,7 +92,6 @@ static const struct file_operations tbots_spi_fops =
     .write = // TODO: impelment
     .read  = // TODO: implement 
     .unlocked_ioctl = // TODO:implement
-    .compat_ioctl = // TODO: implement
     .open = tbots_spi_open,
     .release = tbots_spi_release,
     .llseek = // TODO: implement (doesn't actually need to do anything) 
@@ -63,6 +102,8 @@ struct tbots_spi_data {
 	spinlock_t		spi_lock;
     // 5 motors here spi_device info globals 
 	//struct spi_device	*spi;
+    char            *requested_gpios;
+    char            num_transfers;
 	struct list_head	device_entry;
 
 	/* TX/RX buffers are NULL unless this device is open (users > 0) */
@@ -143,13 +184,76 @@ static int tbots_spi_release(struct inode *inode, struct file *flip)
     return 0;
 }
 
-static ssize_t spidev_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
+static ssize_t
+tbots_spi_sync(struct tbots_spi_data *spidata, struct spi_message *message)
 {
+	DECLARE_COMPLETION_ONSTACK(done);
+	int status;
+	struct spi_device *spi;
+
+	spin_lock_irq(&spidata->spi_lock);
+    // TODO: get spi_device, set up spi device in init
+	spi = spidata->spi;
+	spin_unlock_irq(&spidata->spi_lock);
+
+	if (spi == NULL)
+		status = -ESHUTDOWN;
+	else
+		status = spi_sync(spi, message);
+
+	if (status == 0)
+		status = message->actual_length;
+
+	return status;
+}
+
+
+static inline ssize_t
+tbots_sync_read(struct tbots_spi_data *spi_data, size_t len)
+{
+    ssize_t total_read = 0;
+
+    for (int i = 0; i < spi_data->num_transfers; ++i)
+    {
+        struct spi_transfer	t = {
+                .rx_buf		= spi_data->rx_buffer+(TBOTS_MULTIPLE_TRANSFER_OFFSET*i),
+                .len		= len,
+                .speed_hz	= spi_data->speed_hz,
+            };
+        struct spi_message	m;
+
+        spi_message_init(&m);
+        spi_message_add_tail(&t, &m);
+        total_read += tbots_spi_sync(spi_data, &m);
+    }
+}
+
+
+static ssize_t tbots_spi_read(struct file *filp, char __user *buf, size_t count, loff_t *f_pos)
+{
+    struct tbots_spi_data *tbots_spi;
     ssize_t status = 0;
 
     if (count > bufsiz)
     {
 		return -EMSGSIZE;
     }
+
     // TODO: finish
+    tbots_spi = filp->private_data;
+
+    mutex_lock(&spidev->buf_lock);
+    status = tbots_spi_sync_read(tbots_spi, count);
+    if (status > 0) {
+		unsigned long	missing;
+
+		missing = copy_to_user(buf, spidev->rx_buffer, status);
+		if (missing == status)
+			status = -EFAULT;
+		else
+			status = status - missing;
+	}
+	mutex_unlock(&spidev->buf_lock);
+
+	return status;
 }
