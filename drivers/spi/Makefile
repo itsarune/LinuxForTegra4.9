@@ -10,6 +10,7 @@ subdir-ccflags-y += -Werror
 obj-$(CONFIG_SPI_MASTER)		+= spi.o
 obj-$(CONFIG_SPI_SPIDEV)		+= spidev.o
 obj-$(CONFIG_SPI_LOOPBACK_TEST)		+= spi-loopback-test.o
+obj-$(CONFIG_SPI_TBOTS_SPI) 	+= tbots_spi.o
 
 # SPI master controller drivers (bus)
 obj-$(CONFIG_SPI_ALTERA)		+= spi-altera.o

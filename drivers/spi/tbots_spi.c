@@ -65,6 +65,12 @@ struct spi_board_info tbots_device_info[5] =
 
 struct spi_device tbots_devices[5];
 
+static int __init tbots_spi_init(void)
+{
+    printk(KERN_ALERT "TBOTS SPI DRIVER MODULE LOADED\n");
+
+}
+
 // TODO: do this in init()
 static struct spi_driver spidev_spi_driver = {
 	.driver = {
@@ -310,11 +316,19 @@ static ssize_t tbots_spi_read(struct file *filp, char __user *buf, size_t count,
 
 		missing = copy_to_user(buf, spidev->rx_buffer, status);
 		if (missing == status)
+        {
 			status = -EFAULT;
+        }
 		else
+        {
 			status = status - missing;
+        }
 	}
 	mutex_unlock(&spidev->buf_lock);
 
 	return status;
 }
+
+MODULE_LICENSE("GPL");
+module_init(tbots_spi_init);
+module_exit(tbots_spi_exit);
