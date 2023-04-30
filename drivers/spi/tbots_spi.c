@@ -1,11 +1,15 @@
+#include <asm-generic/errno-base.h>
 #include <linux/fs.h> // allows us to add a new driver
-
+#include <linux/uaccess.h>
+#include <linux/module.h>
 #include <linux/spi/spi.h>
-#include <linux/spi/tbots_spi.h>
 
 #define TBOTS_SPI_MAJOR 60
 #define TBOTS_MOTOR_BUS_NUM 0
 #define TBOTS_MULTIPLE_TRANSFER_OFFSET 5
+#define TBOTS_N_DEVICES 5
+#define TBOTS_MAX_SPEED_HZ 1000000
+#define TBOTS_BUF_SIZE 4096
 
 // register_chrdev adds a new driver by registering a major number to it
 // MAJOR NUMBER identifies the driver associated with it (so all major numbers with this major number will associate with this driver)
@@ -24,93 +28,50 @@
 // how: --struct ioc messages contains (chip select id? motor name?)-- won't work i don't think
 // how: one file descriptor connects to all four motors, then we can send a ioc message with the commanded motor velcoities for four motors
 
-struct spi_board_info tbots_device_info[5] = 
+struct spi_board_info tbots_device_info[TBOTS_N_DEVICES] = 
 {
     {
         .modalias       = "front_left",
-        .max_speed_hz   = 1000000,
+        .max_speed_hz   = TBOTS_MAX_SPEED_HZ,
         .bus_num        = TBOTS_MOTOR_BUS_NUM,
         .chip_select    = 0,
         .mode           = SPI_MODE_3
     },
     {
         .modalias       = "back_left",
-        .max_speed_hz   = 1000000,
+        .max_speed_hz   = TBOTS_MAX_SPEED_HZ,
         .bus_num        = TBOTS_MOTOR_BUS_NUM,
         .chip_select    = 1,
         .mode           = SPI_MODE_3
     },
     {
         .modalias       = "back_right",
-        .max_speed_hz   = 1000000,
+        .max_speed_hz   = TBOTS_MAX_SPEED_HZ,
         .bus_num        = TBOTS_MOTOR_BUS_NUM,
         .chip_select    = 2,
         .mode           = SPI_MODE_3
     },
     {
         .modalias       = "front_right",
-        .max_speed_hz   = 1000000,
+        .max_speed_hz   = TBOTS_MAX_SPEED_HZ,
         .bus_num        = TBOTS_MOTOR_BUS_NUM,
         .chip_select    = 3,
         .mode           = SPI_MODE_3
     },
     {
         .modalias       = "dribbler",
-        .max_speed_hz   = 1000000,
+        .max_speed_hz   = TBOTS_MAX_SPEED_HZ,
         .bus_num        = TBOTS_MOTOR_BUS_NUM,
         .chip_select    = 4,
         .mode           = SPI_MODE_3
     },
 };
 
-struct spi_device tbots_devices[5];
+struct spi_device* tbots_devices[TBOTS_N_DEVICES];
 
-static int __init tbots_spi_init(void)
+struct tbots_spi_data
 {
-    printk(KERN_ALERT "TBOTS SPI DRIVER MODULE LOADED\n");
-
-}
-
-// TODO: do this in init()
-static struct spi_driver spidev_spi_driver = {
-	.driver = {
-		.name =		"tbots_spi",
-        .owner = THIS_MODULE,
-        .pm = &tbots_spi_pm_ops, // TODO: what's this for, needed?
-        // TODO: unclear if the following two lines are needed
-		//.of_match_table = of_match_ptr(spidev_dt_ids),
-		//.acpi_match_table = ACPI_PTR(spidev_acpi_ids),
-	},
-	.probe =	tbots_spi_probe, // TODO: implement
-	.remove =	tbots_spi_remove, // TODO: implement
-
-	/* NOTE:  suspend/resume methods are not necessary here.
-	 * We don't do anything except pass the requests to/from
-	 * the underlying controller.  The refrigerator handles
-	 * most issues; the controller driver handles the rest.
-	 */
-
-
-static const struct file_operations tbots_spi_fops =
-{
-	.owner =	THIS_MODULE,
-
-    .write = // TODO: impelment
-    .read  = tbots_spi_read,
-    .unlocked_ioctl = // TODO:implement
-    .open = tbots_spi_open,
-    .release = tbots_spi_release,
-    .llseek = // TODO: implement (doesn't actually need to do anything) 
-}
-
-struct tbots_spi_data {
-	dev_t			devt;
 	spinlock_t		spi_lock;
-    // 5 motors here spi_device info globals 
-	//struct spi_device	*spi;
-    char            *requested_cs;
-    char            num_transfers;
-	struct list_head	device_entry;
 
 	/* TX/RX buffers are NULL unless this device is open (users > 0) */
 	struct mutex		buf_lock;
@@ -124,22 +85,29 @@ struct tbots_spi_data {
 static int tbots_spi_open(struct inode *inode, struct file *filp)
 {
     struct tbots_spi_data *dev;
+    int status;
 
-    if (!dev->tx_buffer) {
-	    dev->tx_buffer = kmalloc(bufsiz, GFP_KERNEL);
-        if (!dev->tx_buffer) {
+    dev = (struct tbots_spi_data *) filp->private_data;
+
+    if (!dev->tx_buffer)
+    {
+	    dev->tx_buffer = kmalloc(TBOTS_BUF_SIZE, GFP_KERNEL);
+        if (!dev->tx_buffer)
+        {
             // out of memory
-			dev_dbg(&dev->spi->dev, "open/ENOMEM\n");
+            printk(KERN_DEBUG "[TBOTS SPI] can't allocate tx buffer");
 			status = -ENOMEM;
             return status;
 		}
 	}
 
-	if (!dev->rx_buffer) {
-		dev->rx_buffer = kmalloc(bufsiz, GFP_KERNEL);
-		if (!dev->rx_buffer) {
+	if (!dev->rx_buffer)
+    {
+		dev->rx_buffer = kmalloc(TBOTS_BUF_SIZE, GFP_KERNEL);
+		if (!dev->rx_buffer)
+        {
             // out of memory
-			dev_dbg(&dev->spi->dev, "open/ENOMEM\n");
+            printk(KERN_DEBUG "[TBOTS SPI] can't allocate rx buffer");
 			status = -ENOMEM;
 			goto err_alloc_rx_buf;
 		}
@@ -154,38 +122,39 @@ static int tbots_spi_open(struct inode *inode, struct file *filp)
 err_alloc_rx_buf:
 	kfree(dev->tx_buffer);
 	dev->tx_buffer = NULL;
+
+    return status;
 }
 
-static int tbots_spi_release(struct inode *inode, struct file *flip)
+static int tbots_spi_release(struct inode *inode, struct file *filp)
 {
-    struct spidev_data *dev;
+    struct tbots_spi_data *tbots_data;
     int dofree;
 
     // deallocate everything in filp->private_data
-    dev = filp->private_data;
+    tbots_data = filp->private_data;
     filp->private_data = NULL;
-    
-    spin_lock_irq(*dev->spi_lock);
-    // wait until any in-progress transfers are done
-    dofree = (dev->spi == NULL);
-    spin_unlock_irq(*dev->spi_lock);
 
     // decrement user count
-	dev->users--;
+	tbots_data->users--;
 
     // last close? shut down device
-    if (!dev->users)
+    if (!tbots_data->users)
     {
-		kfree(dev->tx_buffer);
-		dev->tx_buffer = NULL;
+		kfree(tbots_data->tx_buffer);
+		tbots_data->tx_buffer = NULL;
 
-		kfree(dev->rx_buffer);
-		dev->rx_buffer = NULL;
+		kfree(tbots_data->rx_buffer);
+		tbots_data->rx_buffer = NULL;
 
 		if (dofree)
-			kfree(dev);
+        {
+			kfree(tbots_data);
+        }
 		else
-			dev->speed_hz = dev->spi->max_speed_hz;
+        {
+			tbots_data->speed_hz = TBOTS_MAX_SPEED_HZ;
+        }
 	}
 
     return 0;
@@ -199,28 +168,33 @@ tbots_spi_sync(struct tbots_spi_data *spidata, struct spi_message *message, int 
 	struct spi_device *spi;
 
 	spin_lock_irq(&spidata->spi_lock);
-    // TODO: get spi_device, set up spi device in init
-	spi = tbots_devices[i];
+	spi = tbots_devices[cs];
 	spin_unlock_irq(&spidata->spi_lock);
 
 	if (spi == NULL)
+    {
 		status = -ESHUTDOWN;
+    }
 	else
+    {
 		status = spi_sync(spi, message);
+    }
 
-	if (status == 0)
+    if (status == 0)
+    {
 		status = message->actual_length;
+    }
 
 	return status;
 }
-
 
 static inline ssize_t
 tbots_sync_read(struct tbots_spi_data *spi_data, size_t len)
 {
     ssize_t total_read = 0;
 
-    for (int i = 0; i < spi_data->num_transfers; ++i)
+    int i;
+    for (i = 0; i < TBOTS_N_DEVICES; ++i)
     {
         struct spi_transfer	t = {
                 .rx_buf		= spi_data->rx_buffer+(TBOTS_MULTIPLE_TRANSFER_OFFSET*i),
@@ -231,31 +205,33 @@ tbots_sync_read(struct tbots_spi_data *spi_data, size_t len)
 
         spi_message_init(&m);
         spi_message_add_tail(&t, &m);
-        total_read += tbots_spi_sync(spi_data, &m, spi_data->requested_cs[i]);
+        total_read += tbots_spi_sync(spi_data, &m, i);
     }
+
+    return total_read;
 }
 
 static inline ssize_t
 tbots_sync_write(struct tbots_spi_data *tbots_data, size_t len)
 {
     ssize_t total_writ = 0;
-    for (int i = 0; i < tbots_data, ++i)
+    int i;
+    for (i = 0; i < TBOTS_N_DEVICES; ++i)
     {
         struct spi_transfer	t = {
-                .tx_buf		= spidev->tx_buffer,
+                .tx_buf		= tbots_data->tx_buffer,
                 .len		= len,
-                .speed_hz	= spidev->speed_hz,
+                .speed_hz	= tbots_data->speed_hz,
             };
         struct spi_message	m;
 
         spi_message_init(&m);
         spi_message_add_tail(&t, &m);
-	    total_writ += tbots_spi_sync(spidev, &m, spi_data->requested_cs[i]);
+	    total_writ += tbots_spi_sync(tbots_data, &m, i);
     }
 
     return total_writ;
 }
-
 
 /* Write-only message with current device setup */
 static ssize_t
@@ -267,7 +243,7 @@ tbots_spi_write(struct file *filp, const char __user *buf,
 	unsigned long		missing;
 
     // return error if it's bigger than the buffer we allocated
-	if (count > bufsiz)
+	if (count > TBOTS_BUF_SIZE)
     {
 		return -EMSGSIZE;
     }
@@ -278,20 +254,13 @@ tbots_spi_write(struct file *filp, const char __user *buf,
 	missing = copy_from_user(tbots_data->tx_buffer, buf, count);
 	if (missing == 0)
     {
-        if (tbots_data->sync)
-        {
-		    status = tbots_sync_write(tbots_data, count);
-        }
-        else
-        {
-		    status = tbots_async_write(tbots_data, count);
-        }
+        status = tbots_sync_write(tbots_data, count);
     }
 	else
     {
 		status = -EFAULT;
     }
-	mutex_unlock(&spidev->buf_lock);
+	mutex_unlock(&tbots_data->buf_lock);
 
 	return status;
 }
@@ -301,20 +270,19 @@ static ssize_t tbots_spi_read(struct file *filp, char __user *buf, size_t count,
     struct tbots_spi_data *tbots_spi;
     ssize_t status = 0;
 
-    if (count > bufsiz)
+    if (count > TBOTS_BUF_SIZE)
     {
 		return -EMSGSIZE;
     }
 
-    // TODO: finish
     tbots_spi = filp->private_data;
 
-    mutex_lock(&spidev->buf_lock);
-    status = tbots_spi_sync_read(tbots_spi, count);
+    mutex_lock(&tbots_spi->buf_lock);
+    status = tbots_sync_read(tbots_spi, count);
     if (status > 0) {
 		unsigned long	missing;
 
-		missing = copy_to_user(buf, spidev->rx_buffer, status);
+		missing = copy_to_user(buf, tbots_spi->rx_buffer, status);
 		if (missing == status)
         {
 			status = -EFAULT;
@@ -324,9 +292,76 @@ static ssize_t tbots_spi_read(struct file *filp, char __user *buf, size_t count,
 			status = status - missing;
         }
 	}
-	mutex_unlock(&spidev->buf_lock);
+	mutex_unlock(&tbots_spi->buf_lock);
 
 	return status;
+}
+
+static void __exit tbots_spi_exit(void)
+{
+    int i;
+    for (i = 0; i < TBOTS_N_DEVICES; ++i)
+    {
+        if (tbots_devices[i])
+        {
+            spi_unregister_device(tbots_devices[i]);
+        }
+    }
+}
+
+static const struct file_operations tbots_spi_fops =
+{
+	.owner =	THIS_MODULE,
+
+    .write = tbots_spi_write,
+    .read  = tbots_spi_read,
+    .open = tbots_spi_open,
+    .release = tbots_spi_release,
+};
+
+static int __init tbots_spi_init(void)
+{
+    int ret;
+    int counter;
+    struct spi_master *master;
+
+    printk(KERN_ALERT "TBOTS SPI DRIVER MODULE LOADED\n");
+
+    ret = register_chrdev(TBOTS_SPI_MAJOR, "motors", &tbots_spi_fops);
+    if (ret < 0)
+    {
+        return ret;
+    }
+
+    master = spi_busnum_to_master(TBOTS_MOTOR_BUS_NUM);
+    if (master == NULL)
+    {
+        pr_err("SPI Master not found");
+        return -ENODEV;
+    }
+
+    for (counter = 0; counter < TBOTS_N_DEVICES; ++counter)
+    {
+        tbots_devices[counter] = spi_new_device(master, &tbots_device_info[counter]);
+        if (tbots_devices[counter] == NULL)
+        {
+            pr_err("Failed to create a SPI device\n");
+            return -ENODEV;
+        }
+    }
+
+    for (counter = 0; counter < TBOTS_N_DEVICES; ++counter)
+    {
+        ret = spi_setup(tbots_devices[counter]);
+        if (ret)
+        {
+            pr_err("Failed to setup SPI device\n");
+            spi_unregister_device(tbots_devices[counter]);
+            return -ENODEV;
+        }
+    }
+
+    return 0;
 }
 
 MODULE_LICENSE("GPL");
