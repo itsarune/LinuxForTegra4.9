@@ -194,17 +194,31 @@ tbots_sync_read(struct tbots_spi_data *spi_data, size_t len)
     ssize_t total_read = 0;
 
     int i;
-    for (i = 0; i < TBOTS_N_DEVICES; ++i)
+    // don't read anything from the dribbler
+    for (i = 0; i < TBOTS_N_DEVICES-1; ++i)
     {
-        struct spi_transfer	t = {
+        struct spi_message m;
+
+        struct spi_transfer write_tx =
+        {
+            .tx_buf     = spi_data->tx_buffer,
+            .len        = 1,
+            .speed_hz   = spi_data->speed_hz,
+        };
+
+        struct spi_transfer	read_tx = 
+        {
                 .rx_buf		= spi_data->rx_buffer+(TBOTS_MULTIPLE_TRANSFER_OFFSET*i),
                 .len		= len,
                 .speed_hz	= spi_data->speed_hz,
-            };
-        struct spi_message	m;
+        };
 
         spi_message_init(&m);
-        spi_message_add_tail(&t, &m);
+        spi_message_add_tail(&write_tx, &m);
+        tbots_spi_sync(spi_data, &m, i);
+
+        spi_message_init(&m);
+        spi_message_add_tail(&read_tx, &m);
         total_read += tbots_spi_sync(spi_data, &m, i);
     }
 
@@ -278,8 +292,17 @@ static ssize_t tbots_spi_read(struct file *filp, char __user *buf, size_t count,
     tbots_spi = filp->private_data;
 
     mutex_lock(&tbots_spi->buf_lock);
+    status = copy_from_user(tbots_spi->tx_buffer, buf, 1); // ignore dribbler
+    if (status != 0)
+    {
+       pr_debug("couldn't copy from transaction buffer to write address before a read buffer"); 
+       status = -EFAULT; 
+       mutex_unlock(&tbots_spi->buf_lock);
+       return status;
+    }
     status = tbots_sync_read(tbots_spi, count);
-    if (status > 0) {
+    if (status > 0)
+    {
 		unsigned long	missing;
 
 		missing = copy_to_user(buf, tbots_spi->rx_buffer, status);
@@ -307,6 +330,7 @@ static void __exit tbots_spi_exit(void)
             spi_unregister_device(tbots_devices[i]);
         }
     }
+    unregister_chrdev(TBOTS_SPI_MAJOR, "motors");
 }
 
 static const struct file_operations tbots_spi_fops =
