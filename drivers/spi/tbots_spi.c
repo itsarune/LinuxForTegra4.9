@@ -82,12 +82,24 @@ struct tbots_spi_data
     bool        sync;
 };
 
+static struct class *tbots_spi_class;
+
+static dev_t dev_tbots_spi;
+DEFINE_MUTEX(buf_lock);
+
 static int tbots_spi_open(struct inode *inode, struct file *filp)
 {
     struct tbots_spi_data *dev;
     int status;
 
-    dev = (struct tbots_spi_data *) filp->private_data;
+    printk(KERN_ALERT "TBOTS SPI OPEN CALLED\n");
+
+    /* Allocate driver data */
+	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
+	if (!dev)
+    {
+		return -ENOMEM;
+    }
 
     if (!dev->tx_buffer)
     {
@@ -113,9 +125,14 @@ static int tbots_spi_open(struct inode *inode, struct file *filp)
 		}
 	}
 
+    spin_lock_init(&dev->spi_lock);
+    mutex_init(&dev->buf_lock);
+
     dev->users++;
     filp->private_data = dev;
     nonseekable_open(inode, filp);
+
+    printk(KERN_ALERT "TBOTS SPI OPEN FINISHED\n");
 
     return 0;
 
@@ -195,23 +212,24 @@ tbots_sync_read(struct tbots_spi_data *spi_data, size_t len)
 
     int i;
     // don't read anything from the dribbler
-    for (i = 0; i < TBOTS_N_DEVICES-1; ++i)
+    for (i = 0; i < TBOTS_N_DEVICES; ++i)
     {
         struct spi_message m;
 
         struct spi_transfer write_tx =
         {
-            .tx_buf     = spi_data->tx_buffer,
-            .len        = 1,
+            .tx_buf = spi_data->tx_buffer,
+            .len = 1,
+            .speed_hz = spi_data->speed_hz,
+        };
+
+        struct spi_transfer read_tx =
+        {
+            .rx_buf		= spi_data->rx_buffer+(4*i),
+            .len        = 4,
             .speed_hz   = spi_data->speed_hz,
         };
 
-        struct spi_transfer	read_tx = 
-        {
-                .rx_buf		= spi_data->rx_buffer+(TBOTS_MULTIPLE_TRANSFER_OFFSET*i),
-                .len		= len,
-                .speed_hz	= spi_data->speed_hz,
-        };
 
         spi_message_init(&m);
         spi_message_add_tail(&write_tx, &m);
@@ -233,8 +251,8 @@ tbots_sync_write(struct tbots_spi_data *tbots_data, size_t len)
     for (i = 0; i < TBOTS_N_DEVICES; ++i)
     {
         struct spi_transfer	t = {
-                .tx_buf		= tbots_data->tx_buffer,
-                .len		= len,
+                .tx_buf		= tbots_data->tx_buffer+i*5,
+                .len		= 5,
                 .speed_hz	= tbots_data->speed_hz,
             };
         struct spi_message	m;
@@ -256,16 +274,20 @@ tbots_spi_write(struct file *filp, const char __user *buf,
 	ssize_t			status = 0;
 	unsigned long		missing;
 
+    printk(KERN_ALERT "TBOTS SPI WRITE CALLED\n");
+
     // return error if it's bigger than the buffer we allocated
 	if (count > TBOTS_BUF_SIZE)
     {
 		return -EMSGSIZE;
     }
 
-	tbots_data = filp->private_data;
+	tbots_data = (struct tbots_spi_data *) filp->private_data;
 
-	mutex_lock(&tbots_data->buf_lock);
+    printk(KERN_ALERT "mutex lock status: %i\n", mutex_is_locked(&buf_lock));
+	mutex_lock(&buf_lock);
 	missing = copy_from_user(tbots_data->tx_buffer, buf, count);
+    printk(KERN_ALERT "data copied from user buffer: %li\n", count);
 	if (missing == 0)
     {
         status = tbots_sync_write(tbots_data, count);
@@ -274,7 +296,7 @@ tbots_spi_write(struct file *filp, const char __user *buf,
     {
 		status = -EFAULT;
     }
-	mutex_unlock(&tbots_data->buf_lock);
+	mutex_unlock(&buf_lock);
 
 	return status;
 }
@@ -283,6 +305,9 @@ static ssize_t tbots_spi_read(struct file *filp, char __user *buf, size_t count,
 {
     struct tbots_spi_data *tbots_spi;
     ssize_t status = 0;
+    int i;
+
+    printk(KERN_ALERT "TBOTS SPI READ CALLED\n");
 
     if (count > TBOTS_BUF_SIZE)
     {
@@ -292,7 +317,7 @@ static ssize_t tbots_spi_read(struct file *filp, char __user *buf, size_t count,
     tbots_spi = filp->private_data;
 
     mutex_lock(&tbots_spi->buf_lock);
-    status = copy_from_user(tbots_spi->tx_buffer, buf, 1); // ignore dribbler
+    tbots_spi->tx_buffer[0] = 60;
     if (status != 0)
     {
        pr_debug("couldn't copy from transaction buffer to write address before a read buffer"); 
@@ -301,6 +326,12 @@ static ssize_t tbots_spi_read(struct file *filp, char __user *buf, size_t count,
        return status;
     }
     status = tbots_sync_read(tbots_spi, count);
+    printk(KERN_ALERT "read: ");
+    for (i = 0; i < 25; ++i)
+    {
+        printk(KERN_ALERT "%x", tbots_spi->rx_buffer[i]);
+    }
+    printk(KERN_ALERT "\n");
     if (status > 0)
     {
 		unsigned long	missing;
@@ -330,6 +361,7 @@ static void __exit tbots_spi_exit(void)
             spi_unregister_device(tbots_devices[i]);
         }
     }
+    class_destroy(tbots_spi_class);
     unregister_chrdev(TBOTS_SPI_MAJOR, "motors");
 }
 
@@ -357,6 +389,13 @@ static int __init tbots_spi_init(void)
         return ret;
     }
 
+    tbots_spi_class = class_create(THIS_MODULE, "motors");
+    if (IS_ERR(tbots_spi_class))
+    {
+        unregister_chrdev(TBOTS_SPI_MAJOR, "motors");
+        return PTR_ERR(tbots_spi_class);
+    }
+
     master = spi_busnum_to_master(TBOTS_MOTOR_BUS_NUM);
     if (master == NULL)
     {
@@ -377,15 +416,31 @@ static int __init tbots_spi_init(void)
     for (counter = 0; counter < TBOTS_N_DEVICES; ++counter)
     {
         ret = spi_setup(tbots_devices[counter]);
+        tbots_devices[counter]->bits_per_word = 8;
         if (ret)
         {
+            goto error_handle;
             pr_err("Failed to setup SPI device\n");
             spi_unregister_device(tbots_devices[counter]);
             return -ENODEV;
         }
     }
 
+    dev_tbots_spi = MKDEV(TBOTS_SPI_MAJOR, 0);
+
+    printk(KERN_ALERT "TBOTS SPI DRIVER MODULE LOADED SUCCESSFULLY\n");
     return 0;
+
+error_handle:
+    for (counter = 0; counter < TBOTS_N_DEVICES; ++counter)
+    {
+        if (tbots_devices[counter])
+        {
+            spi_unregister_device(tbots_devices[counter]);
+        }
+    }
+
+    return -ENODEV;
 }
 
 MODULE_LICENSE("GPL");
